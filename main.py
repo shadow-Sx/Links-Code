@@ -7,7 +7,6 @@ from datetime import datetime
 import logging
 from flask import Flask, request
 import threading
-from bson import ObjectId
 
 # Logging sozlamalari
 logging.basicConfig(
@@ -36,13 +35,10 @@ if admin_ids_str:
 
 # MongoDB ulanish
 try:
-    # MongoDB URI ni to'g'rilash
     if not MONGODB_URI:
         raise ValueError("MONGODB_URI environment variable topilmadi!")
     
-    # URI dagi <db_password> ni o'zingiz Render'da to'ldirasiz
     client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
-    # Ulanishni tekshirish
     client.admin.command('ping')
     
     db = client[DB_NAME]
@@ -76,7 +72,6 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 def get_next_code_number():
     """Eng oxirgi kod raqamini qaytaradi va 1 ga oshiradi"""
     try:
-        # Settings collection'dan oxirgi raqamni olish
         setting = settings_collection.find_one_and_update(
             {"_id": "code_counter"},
             {"$inc": {"last_code_number": 1}},
@@ -87,14 +82,13 @@ def get_next_code_number():
         if setting:
             code_number = setting.get('last_code_number', 1)
         else:
-            # Agar birinchi marta bo'lsa
             settings_collection.insert_one({"_id": "code_counter", "last_code_number": 1})
             code_number = 1
         
         return str(code_number)
     except Exception as e:
         logger.error(f"Kod raqami olishda xatolik: {e}")
-        return str(int(datetime.now().timestamp()))  # Fallback
+        return str(int(datetime.now().timestamp()))
 
 # Yordamchi funksiyalar
 def is_admin(user_id):
@@ -115,7 +109,7 @@ def get_channel_invite_link(channel_id):
         # Yangi bir martalik taklif havolasi yaratish
         invite_link = bot.create_chat_invite_link(
             chat_id=channel_id,
-            member_limit=1,  # Faqat 1 kishi foydalana oladi
+            member_limit=1,
             name=f"One-time invite {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         
@@ -138,7 +132,8 @@ def verify_and_use_code(code, user_id, username, first_name):
         if not code_data:
             return {
                 "success": False, 
-                "message": "❌ <b>Noto'g'ri yoki aktiv bo'lmagan kod!</b>\n\nIltimos, to'g'ri kodni kiriting."
+                "message": "❌ <b>Noto'g'ri yoki aktiv bo'lmagan kod!</b>\n\nIltimos, to'g'ri kodni kiriting.",
+                "invite_link": None
             }
         
         # Foydalanuvchi bu kodni oldin ishlatganmi tekshirish
@@ -148,7 +143,8 @@ def verify_and_use_code(code, user_id, username, first_name):
             if any(user["user_id"] == user_id_str for user in used_users):
                 return {
                     "success": False, 
-                    "message": "❌ <b>Siz bu kodni oldin ishlatgansiz!</b>\n\nHar bir kod faqat bir marta ishlatilishi mumkin."
+                    "message": "❌ <b>Siz bu kodni oldin ishlatgansiz!</b>\n\nHar bir kod faqat bir marta ishlatilishi mumkin.",
+                    "invite_link": None
                 }
         
         # Kanal ma'lumotlari
@@ -156,7 +152,8 @@ def verify_and_use_code(code, user_id, username, first_name):
         if not channel_data:
             return {
                 "success": False, 
-                "message": "❌ <b>Kanal topilmadi!</b>\n\nAdmin bilan bog'laning."
+                "message": "❌ <b>Kanal topilmadi!</b>\n\nAdmin bilan bog'laning.",
+                "invite_link": None
             }
         
         # Bir martalik havola yaratish
@@ -164,7 +161,8 @@ def verify_and_use_code(code, user_id, username, first_name):
         if not invite_link:
             return {
                 "success": False, 
-                "message": "❌ <b>Havola yaratishda texnik xatolik!</b>\n\nIltimos, keyinroq qayta urinib ko'ring yoki admin bilan bog'laning."
+                "message": "❌ <b>Havola yaratishda texnik xatolik!</b>\n\nIltimos, keyinroq qayta urinib ko'ring yoki admin bilan bog'laning.",
+                "invite_link": None
             }
         
         # Kodni yangilash
@@ -210,23 +208,21 @@ def verify_and_use_code(code, user_id, username, first_name):
         
         # Muvaffaqiyatli xabar
         success_message = f"""
-✅ <b>Kod muvaffaqiyatli qabul qilindi!</b>
-
-📱 <b>Kanal:</b> {channel_data.get('channel_name', 'Noma\'lum kanal')}
-🔗 <b>Bir martalik havola:</b> {invite_link}
-
-⚠️ <b>Muhim:</b>
-• Bu havola faqat 1 kishi foydalanishi uchun
-• Havola muddati cheksiz
-• Kanalga faqat shu havola orqali kira olasiz
+<b>Topildi 🎉</b>
+<blockquote><b>Kanalga qoshilish uchun pastdagi tugmani bosing va kanalga qoshiling</b></blockquote>
 """
-        return {"success": True, "message": success_message}
+        return {
+            "success": True, 
+            "message": success_message,
+            "invite_link": invite_link
+        }
         
     except Exception as e:
         logger.error(f"Kod tekshirishda xatolik: {e}")
         return {
             "success": False, 
-            "message": "❌ <b>Xatolik yuz berdi!</b>\n\nIltimos, qaytadan urinib ko'ring."
+            "message": "❌ <b>Xatolik yuz berdi!</b>\n\nIltimos, qaytadan urinib ko'ring.",
+            "invite_link": None
         }
 
 # Bot komandalari
@@ -249,7 +245,6 @@ Men maxsus kod orqali kanallarga bir martalik taklif havolasini beruvchi botman.
 💡 Kodni shunchaki xabar sifatida yuboring!
 """.format(message.from_user.first_name)
     
-    # Tugmalar
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_help = types.KeyboardButton('📚 Yordam')
     btn_info = types.KeyboardButton('ℹ️ Bot haqida')
@@ -361,7 +356,6 @@ def add_channel_id(message):
         return
     
     try:
-        # Formatni tekshirish
         text = message.text.replace('/add_channel_id ', '')
         parts = text.split('|')
         
@@ -372,11 +366,9 @@ def add_channel_id(message):
         channel_id = parts[0].strip()
         channel_name = parts[1].strip()
         
-        # Kanal mavjudligini tekshirish
         try:
             chat = bot.get_chat(channel_id)
             
-            # Bot adminligini tekshirish
             bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
             if bot_member.status != 'administrator':
                 bot.reply_to(message, "❌ Bot bu kanalda admin emas! Avval admin qiling.")
@@ -390,7 +382,6 @@ def add_channel_id(message):
             bot.reply_to(message, f"❌ Kanal topilmadi yoki bot a'zo emas! ID: {channel_id}\nXatolik: {e}")
             return
         
-        # Kanalni saqlash
         channels_collection.update_one(
             {"channel_id": channel_id},
             {
@@ -431,14 +422,12 @@ def generate_code_command(message):
         bot.reply_to(message, "❌ Ruxsat yo'q!")
         return
     
-    # Kanallar ro'yxatini olish
     channels = list(channels_collection.find({"is_active": True}))
     
     if not channels:
         bot.reply_to(message, "❌ Hech qanday kanal qo'shilmagan! Avval /add_channel")
         return
     
-    # Tugmalar yaratish
     markup = types.InlineKeyboardMarkup(row_width=1)
     for channel in channels:
         btn_text = f"📱 {channel['channel_name']}"
@@ -461,18 +450,15 @@ def generate_code_for_channel(call):
     
     channel_id = call.data.replace('gen_code_', '')
     
-    # Kanal ma'lumotlari
     channel = channels_collection.find_one({"channel_id": channel_id})
     if not channel:
         bot.answer_callback_query(call.id, "❌ Kanal topilmadi!")
         return
     
     try:
-        # Yangi kod raqami
         code_number = get_next_code_number()
         code = code_number
         
-        # Kod yaratish
         codes_collection.insert_one({
             "code": code,
             "channel_id": channel_id,
@@ -489,7 +475,6 @@ def generate_code_for_channel(call):
         
         bot.answer_callback_query(call.id, "✅ Kod yaratildi!")
         
-        # Xabar yuborish
         bot.edit_message_text(
             f"""✅ <b>Kod muvaffaqiyatli yaratildi!</b>
 
@@ -599,7 +584,6 @@ def show_stats(message):
         used_codes = codes_collection.count_documents({"used_count": {"$gt": 0}})
         total_users = users_collection.count_documents({})
         
-        # Oxirgi kod raqami
         setting = settings_collection.find_one({"_id": "code_counter"})
         last_code = setting.get('last_code_number', 0) if setting else 0
         
@@ -678,7 +662,6 @@ def handle_all_messages(message):
     
     # Admin komandalarni tekshirish
     if text.startswith('/'):
-        # Agar noma'lum komanda bo'lsa
         bot.reply_to(message, "❌ Noma'lum komanda! /help orqali yordam oling.")
         return
     
@@ -686,12 +669,24 @@ def handle_all_messages(message):
     logger.info(f"Foydalanuvchi {user_id} ({first_name}) kod yubordi: {text}")
     result = verify_and_use_code(text, user_id, username, first_name)
     
-    if result["success"]:
-        # Muvaffaqiyatli holatda maxsus tugmalar
+    if result["success"] and result["invite_link"]:
+        # Tugma yaratish - chiroyli ko'rinishda
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔗 Kanalga o'tish", url=result["message"].split("🔗 <b>Bir martalik havola:</b> ")[1].split("\n")[0]))
-        bot.reply_to(message, result["message"], reply_markup=markup, parse_mode='HTML')
+        btn_join = types.InlineKeyboardButton(
+            text="▷ 𝗞𝗮𝗻𝗮𝗹𝗴𝗮 𝗾𝗼'𝘀𝗵𝗶𝗹𝗶𝘀𝗵 ◁",
+            url=result["invite_link"]
+        )
+        markup.add(btn_join)
+        
+        # Xabar va tugmani yuborish
+        bot.reply_to(
+            message, 
+            result["message"],
+            reply_markup=markup,
+            parse_mode='HTML'
+        )
     else:
+        # Xatolik xabari
         bot.reply_to(message, result["message"], parse_mode='HTML')
 
 # Flask routes (Render Web Service uchun)
@@ -738,7 +733,6 @@ def run_bot():
     """Botni ishga tushirish"""
     logger.info("🤖 Bot ishga tushmoqda...")
     try:
-        # Webhook o'rniga polling ishlatamiz
         bot.remove_webhook()
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
