@@ -1,5 +1,6 @@
 import os
 import sys
+import certifi
 import telebot
 from telebot import types
 from pymongo import MongoClient
@@ -33,12 +34,24 @@ if admin_ids_str:
     except ValueError:
         logger.error("ADMIN_IDS noto'g'ri formatda! Misol: ADMIN_IDS=123456789,987654321")
 
-# MongoDB ulanish
+# MongoDB ulanish (SSL muammosini hal qilish)
 try:
     if not MONGODB_URI:
         raise ValueError("MONGODB_URI environment variable topilmadi!")
     
-    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
+    # MongoDB ulanish sozlamalari - SSL xatosini tuzatish
+    client = MongoClient(
+        MONGODB_URI,
+        tls=True,
+        tlsCAFile=certifi.where(),
+        serverSelectionTimeoutMS=30000,
+        connectTimeoutMS=30000,
+        socketTimeoutMS=30000,
+        retryWrites=True,
+        w='majority'
+    )
+    
+    # Ulanishni tekshirish
     client.admin.command('ping')
     
     db = client[DB_NAME]
