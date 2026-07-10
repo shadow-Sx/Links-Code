@@ -3,7 +3,7 @@ import sys
 import telebot
 from telebot import types
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from flask import Flask
 import threading
@@ -65,6 +65,9 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 bot_started = False
 user_states = {}
 
+# Havola muddati (daqiqa)
+LINK_EXPIRE_MINUTES = 10
+
 # ============ FUNKSIYALAR ============
 
 def get_next_code_number():
@@ -104,14 +107,26 @@ def create_code_for_channel(channel_id, channel_name):
         return None
 
 def get_channel_invite_link(channel_id):
+    """Kanal uchun 1 kishilik va vaqtli havola yaratadi"""
     try:
         bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
         if bot_member.status != 'administrator' or not bot_member.can_invite_users:
             return None
-        invite = bot.create_chat_invite_link(chat_id=channel_id, member_limit=1)
-        return invite.invite_link
-    except:
-        return None
+        
+        # Vaqt chegarasi
+        expire_time = datetime.now() + timedelta(minutes=LINK_EXPIRE_MINUTES)
+        
+        invite = bot.create_chat_invite_link(
+            chat_id=channel_id,
+            member_limit=1,  # Faqat 1 kishi
+            expire_date=expire_time  # 10 daqiqa
+        )
+        
+        logger.info(f"✅ Havola yaratildi (1 kishilik, {LINK_EXPIRE_MINUTES} daqiqa): {invite.invite_link[:30]}...")
+        return invite.invite_link, expire_time
+    except Exception as e:
+        logger.error(f"Havola yaratishda xatolik: {e}")
+        return None, None
 
 def verify_and_use_code(code, user_id, username, first_name):
     try:
@@ -129,16 +144,26 @@ def verify_and_use_code(code, user_id, username, first_name):
         if not channel_data:
             return {"success": False, "message": "❌ Kanal topilmadi!", "invite_link": None}
         
-        invite_link = get_channel_invite_link(code_data["channel_id"])
+        invite_link, expire_time = get_channel_invite_link(code_data["channel_id"])
         if not invite_link:
             return {"success": False, "message": "❌ Havola yaratishda xatolik!", "invite_link": None}
         
         codes_collection.update_one(
             {"_id": code_data["_id"]},
             {
-                "$push": {"used_by": {"user_id": user_id_str, "username": username, "first_name": first_name, "used_at": datetime.now()}},
+                "$push": {"used_by": {
+                    "user_id": user_id_str,
+                    "username": username,
+                    "first_name": first_name,
+                    "used_at": datetime.now(),
+                    "expire_time": expire_time
+                }},
                 "$inc": {"used_count": 1},
-                "$set": {"last_used_at": datetime.now(), "last_invite_link": invite_link}
+                "$set": {
+                    "last_used_at": datetime.now(),
+                    "last_invite_link": invite_link,
+                    "last_expire_time": expire_time
+                }
             }
         )
         
@@ -146,15 +171,33 @@ def verify_and_use_code(code, user_id, username, first_name):
             {"user_id": user_id_str},
             {
                 "$set": {"username": username, "first_name": first_name, "last_used_at": datetime.now()},
-                "$push": {"used_codes": {"code": code, "channel_name": channel_data.get("channel_name"), "used_at": datetime.now()}},
+                "$push": {"used_codes": {
+                    "code": code,
+                    "channel_name": channel_data.get("channel_name"),
+                    "used_at": datetime.now(),
+                    "expire_time": expire_time
+                }},
                 "$inc": {"total_uses": 1}
             },
             upsert=True
         )
         
+        # Vaqtni formatlash
+        expire_str = expire_time.strftime('%H:%M') if expire_time else "10 daqiqa"
+        
+        success_message = f"""
+✅ <b>Kod qabul qilindi!</b>
+
+📱 <b>Kanal:</b> {channel_data.get('channel_name')}
+
+⏰ <b>Havola muddati:</b> {expire_str} gacha
+👤 <b>Foydalanish:</b> Faqat 1 kishi
+
+🔽 Pastdagi tugma orqali kanalga qo'shiling:
+"""
         return {
             "success": True,
-            "message": f"✅ Kod qabul qilindi!\n\n📱 Kanal: {channel_data.get('channel_name')}\n\n🔽 Pastdagi tugma orqali kanalga qo'shiling:",
+            "message": success_message,
             "invite_link": invite_link
         }
     except Exception as e:
@@ -189,7 +232,7 @@ def help_cmd(message):
     if is_admin(message.from_user.id):
         bot.reply_to(message, "👑 Admin panel:\n\n➕ Kanal qo'shish\n📋 Kanallar - ro'yxat va o'chirish\n📊 Statistika\n📢 Xabar yuborish - tugma bilan")
     else:
-        bot.reply_to(message, "📝 Kodni oling va botga yuboring.")
+        bot.reply_to(message, "📝 Kodni oling va botga yuboring.\n\nHavola 1 kishilik va 10 daqiqa amal qiladi.")
 
 # ============ 1. KANAL QO'SHISH ============
 
@@ -203,8 +246,7 @@ def add_channel_start(message):
 Kanal ID sini yuboring:
 Misol: <code>-1001234567890</code>
 
-📌 <b>Kanal ID sini olish:</b>
-@getidsbot ga kanaldan xabar forward qiling
+📌 Kanal ID sini @getidsbot orqali oling.
 
 ❌ Bekor qilish: /cancel""",
         reply_markup=types.ReplyKeyboardRemove()
@@ -256,9 +298,11 @@ def process_channel_id(message):
 🆔 <b>ID:</b> <code>{channel_id}</code>
 {"🔗 @" + channel_username if channel_username else ""}
 
-🔑 <b>Avtomatik kod:</b> <code>{code}</code>
+🔑 <b>Kod:</b> <code>{code}</code>
 
-📝 Bu kodni foydalanuvchiga bering.
+📝 Bu kod orqali havola:
+• 1 kishilik
+• {LINK_EXPIRE_MINUTES} daqiqa muddatli
 """
             bot.reply_to(message, success_text, reply_markup=admin_menu())
         else:
@@ -281,7 +325,6 @@ def list_channels_btn(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     for ch in channels:
         channel_name = ch.get('channel_name', 'Nomsiz')
-        # Kodlar soni
         code_count = codes_collection.count_documents({"channel_id": ch['channel_id'], "is_active": True})
         btn_text = f"📱 {channel_name} | 🔑 {code_count} kod"
         markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"channel_{ch['channel_id']}"))
@@ -301,7 +344,6 @@ def channel_detail(call):
         bot.answer_callback_query(call.id, "❌ Kanal topilmadi!")
         return
     
-    # Kodlar soni
     code_count = codes_collection.count_documents({"channel_id": channel_id, "is_active": True})
     used_count = codes_collection.count_documents({"channel_id": channel_id, "used_count": {"$gt": 0}})
     
@@ -365,7 +407,6 @@ def delete_channel(call):
         bot.answer_callback_query(call.id, "❌ Kanal topilmadi!")
         return
     
-    # Tasdiqlash
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("✅ Ha, o'chirish", callback_data=f"confirm_delete_{channel_id}"),
@@ -388,13 +429,11 @@ def confirm_delete_channel(call):
     
     channel_id = call.data.replace('confirm_delete_', '')
     
-    # Kanalni o'chirish
     channels_collection.update_one(
         {"channel_id": channel_id},
         {"$set": {"is_active": False, "deleted_at": datetime.now()}}
     )
     
-    # Kodlarni o'chirish
     codes_collection.update_many(
         {"channel_id": channel_id},
         {"$set": {"is_active": False, "deleted_at": datetime.now()}}
@@ -402,7 +441,6 @@ def confirm_delete_channel(call):
     
     bot.answer_callback_query(call.id, "✅ Kanal o'chirildi!")
     
-    # Yangilangan ro'yxat
     channels = list(channels_collection.find({"is_active": True}))
     
     if not channels:
@@ -432,11 +470,9 @@ def stats_btn(message):
     active_codes = codes_collection.count_documents({"is_active": True})
     used_codes = codes_collection.count_documents({"used_count": {"$gt": 0}})
     
-    # Barcha foydalanuvchilar (unique)
     all_users = users_collection.distinct("user_id")
     total_users = len(all_users)
     
-    # Bugun qo'shilgan
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_users = users_collection.count_documents({"last_used_at": {"$gte": today}})
     
@@ -455,12 +491,13 @@ def stats_btn(message):
 🆕 <b>Bugun:</b> {today_users} ta
 
 🔢 <b>Oxirgi kod:</b> {last_code}
+⏰ <b>Havola muddati:</b> {LINK_EXPIRE_MINUTES} daqiqa
 
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
     bot.reply_to(message, text)
 
-# ============ 4. XABAR YUBORISH (TUGMA BILAN) ============
+# ============ 4. XABAR YUBORISH ============
 
 @bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📢 Xabar yuborish')
 def broadcast_btn(message):
@@ -476,8 +513,6 @@ def broadcast_btn(message):
 Misol:
 <code>Kanalga o'tish - https://t.me/kanal</code>
 
-Bir nechta tugma uchun har birini yangi qatordan yozing.
-
 ❌ Bekor qilish: /cancel""",
         reply_markup=types.ReplyKeyboardRemove()
     )
@@ -490,16 +525,12 @@ def process_broadcast_text(message):
     }
     bot.reply_to(
         message,
-        f"""📝 <b>Xabar matni saqlandi!</b>
+        """📝 Xabar matni saqlandi!
 
 Endi tugmalarni qo'shing:
 <code>Tugma matni - havola</code>
 
-Misol:
-<code>Kanalga o'tish - https://t.me/kanal</code>
-<code>Bot - https://t.me/bot</code>
-
-Yoki tugmasiz yuborish uchun <b>/send</b> deb yozing.
+Yoki tugmasiz yuborish uchun <b>/send</b>
 
 ❌ Bekor qilish: /cancel"""
     )
@@ -516,14 +547,12 @@ def send_broadcast_no_buttons(message):
     text = state_data.get("text", "")
     del user_states[message.from_user.id]
     
-    # Tugmasiz yuborish
     send_broadcast_to_users(message, text, None)
 
 @bot.message_handler(func=lambda m: is_admin(m.from_user.id) and isinstance(user_states.get(m.from_user.id), dict) and user_states[m.from_user.id].get("state") == "waiting_broadcast_buttons")
 def process_broadcast_buttons(message):
     text = message.text.strip()
     
-    # Tugmalarni ajratish
     buttons = []
     lines = text.split('\n')
     
@@ -540,11 +569,9 @@ def process_broadcast_buttons(message):
     broadcast_text = state_data.get("text", "")
     del user_states[message.from_user.id]
     
-    # Tugma bilan yuborish
     send_broadcast_to_users(message, broadcast_text, buttons)
 
 def send_broadcast_to_users(message, text, buttons):
-    """Xabarni barcha foydalanuvchilarga yuborish"""
     users = users_collection.find({})
     sent = 0
     err = 0
@@ -605,11 +632,11 @@ def handle_message(message):
 
 @app.route('/')
 def index():
-    return f"<h1>🤖 Bot ishlamoqda!</h1><p>Status: {'✅ Active' if bot_started else '⏳ Starting...'}</p>"
+    return f"<h1>🤖 Bot ishlamoqda!</h1><p>Status: {'✅ Active' if bot_started else '⏳ Starting...'}</p><p>Havola muddati: {LINK_EXPIRE_MINUTES} daqiqa</p>"
 
 @app.route('/health')
 def health():
-    return {"status": "healthy" if bot_started else "starting"}
+    return {"status": "healthy" if bot_started else "starting", "link_expire_minutes": LINK_EXPIRE_MINUTES}
 
 # ============ BOTNI ISHGA TUSHIRISH ============
 
@@ -621,6 +648,7 @@ def init_bot():
         time.sleep(0.5)
         bot_info = bot.get_me()
         logger.info(f"✅ Bot: @{bot_info.username}")
+        logger.info(f"⏰ Havola muddati: {LINK_EXPIRE_MINUTES} daqiqa")
         bot_started = True
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
