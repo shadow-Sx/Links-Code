@@ -10,7 +10,7 @@ import threading
 import traceback
 import time
 
-# Logging sozlamalari
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app
+# Flask
 app = Flask(__name__)
 
 # Environment variables
@@ -65,7 +65,8 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 bot_started = False
 user_states = {}
 
-# Funksiyalar
+# ============ FUNKSIYALAR ============
+
 def get_next_code_number():
     try:
         setting = settings_collection.find_one_and_update(
@@ -80,6 +81,27 @@ def get_next_code_number():
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
+
+def create_code_for_channel(channel_id, channel_name):
+    try:
+        code = get_next_code_number()
+        codes_collection.insert_one({
+            "code": code,
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "is_active": True,
+            "used_by": [],
+            "used_count": 0,
+            "created_by": "auto",
+            "created_at": datetime.now(),
+            "last_used_at": None,
+            "last_invite_link": None
+        })
+        logger.info(f"✅ Kod yaratildi: {code} -> {channel_name}")
+        return code
+    except Exception as e:
+        logger.error(f"Kod yaratishda xatolik: {e}")
+        return None
 
 def get_channel_invite_link(channel_id):
     try:
@@ -139,112 +161,55 @@ def verify_and_use_code(code, user_id, username, first_name):
         logger.error(f"Kod tekshirishda xatolik: {e}")
         return {"success": False, "message": "❌ Xatolik!", "invite_link": None}
 
-# Admin menyusi
+# ============ ADMIN MENYU ============
+
 def admin_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton('➕ Kanal qo\'shish'),
-        types.KeyboardButton('🔑 Kod yaratish'),
-        types.KeyboardButton('📋 Kanallar'),
-        types.KeyboardButton('📝 Kodlar'),
+        types.KeyboardButton('📋 Kanallar')
+    )
+    markup.add(
         types.KeyboardButton('📊 Statistika'),
         types.KeyboardButton('📢 Xabar yuborish')
     )
     return markup
 
-# /start
+# ============ BOT KOMANDALARI ============
+
 @bot.message_handler(commands=['start'])
 def start(message):
     if is_admin(message.from_user.id):
-        bot.reply_to(message, "👑 Admin panel\n\nKerakli amalni tanlang:", reply_markup=admin_menu())
+        bot.reply_to(message, "👑 <b>Admin panel</b>\n\nKerakli amalni tanlang:", reply_markup=admin_menu())
     else:
         bot.reply_to(message, "🔑 <b>Kodni kiriting:</b>", reply_markup=types.ReplyKeyboardRemove())
 
-# /help
 @bot.message_handler(commands=['help'])
 def help_cmd(message):
     if is_admin(message.from_user.id):
-        bot.reply_to(message, "Admin komandalari:\n➕ Kanal qo'shish - Kanal ID orqali qo'shish\n🔑 Kod yaratish - Yangi kod\n📋 Kanallar - Ro'yxat\n📝 Kodlar - Kodlar ro'yxati\n📊 Statistika\n📢 Xabar yuborish")
+        bot.reply_to(message, "👑 Admin panel:\n\n➕ Kanal qo'shish\n📋 Kanallar - ro'yxat va o'chirish\n📊 Statistika\n📢 Xabar yuborish - tugma bilan")
     else:
-        bot.reply_to(message, "📝 Kodni oling va botga yuboring. Bot sizga bir martalik havola beradi.")
+        bot.reply_to(message, "📝 Kodni oling va botga yuboring.")
 
-# Admin tugmalari
+# ============ 1. KANAL QO'SHISH ============
+
 @bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '➕ Kanal qo\'shish')
 def add_channel_start(message):
     user_states[message.from_user.id] = "waiting_channel_id"
-    bot.reply_to(message, "📝 Kanal ID sini yuboring:\n\nMisol: -1001234567890\n\n❌ Bekor qilish: /cancel", reply_markup=types.ReplyKeyboardRemove())
+    bot.reply_to(
+        message,
+        """📝 <b>Kanal qo'shish</b>
 
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '🔑 Kod yaratish')
-def generate_code_btn(message):
-    channels = list(channels_collection.find({"is_active": True}))
-    if not channels:
-        bot.reply_to(message, "❌ Kanal yo'q! Avval kanal qo'shing.")
-        return
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for ch in channels:
-        markup.add(types.InlineKeyboardButton(f"📱 {ch['channel_name']}", callback_data=f"gen_{ch['channel_id']}"))
-    
-    bot.reply_to(message, "Qaysi kanal uchun kod yaratamiz?", reply_markup=markup)
+Kanal ID sini yuboring:
+Misol: <code>-1001234567890</code>
 
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📋 Kanallar')
-def list_channels_btn(message):
-    channels = list(channels_collection.find({"is_active": True}))
-    if not channels:
-        bot.reply_to(message, "Kanallar yo'q!")
-        return
-    text = "📋 <b>Kanallar:</b>\n\n"
-    for i, ch in enumerate(channels, 1):
-        text += f"{i}. {ch['channel_name']}\n   🆔 <code>{ch['channel_id']}</code>\n\n"
-    bot.reply_to(message, text)
+📌 <b>Kanal ID sini olish:</b>
+@getidsbot ga kanaldan xabar forward qiling
 
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📝 Kodlar')
-def list_codes_btn(message):
-    codes = list(codes_collection.find({"is_active": True}).sort("created_at", -1).limit(20))
-    if not codes:
-        bot.reply_to(message, "Kodlar yo'q!")
-        return
-    text = "📝 <b>Kodlar:</b>\n\n"
-    for i, cd in enumerate(codes, 1):
-        status = "✅" if cd['used_count'] > 0 else "🆕"
-        text += f"{i}. {status} <code>{cd['code']}</code> - {cd.get('channel_name', 'N/A')}\n"
-    bot.reply_to(message, text)
+❌ Bekor qilish: /cancel""",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
 
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📊 Statistika')
-def stats_btn(message):
-    total_ch = channels_collection.count_documents({"is_active": True})
-    total_co = codes_collection.count_documents({})
-    active_co = codes_collection.count_documents({"is_active": True})
-    used_co = codes_collection.count_documents({"used_count": {"$gt": 0}})
-    total_us = users_collection.count_documents({})
-    
-    text = f"""
-📊 <b>Statistika</b>
-
-📱 Kanallar: {total_ch}
-🔑 Kodlar: {total_co}
-✅ Aktiv: {active_co}
-👥 Ishlatilgan: {used_co}
-👤 Foydalanuvchilar: {total_us}
-"""
-    bot.reply_to(message, text)
-
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📢 Xabar yuborish')
-def broadcast_btn(message):
-    user_states[message.from_user.id] = "waiting_broadcast"
-    bot.reply_to(message, "📢 Yuboriladigan xabarni yozing:\n\n❌ Bekor qilish: /cancel", reply_markup=types.ReplyKeyboardRemove())
-
-# /cancel
-@bot.message_handler(commands=['cancel'])
-def cancel(message):
-    if message.from_user.id in user_states:
-        del user_states[message.from_user.id]
-        if is_admin(message.from_user.id):
-            bot.reply_to(message, "❌ Bekor qilindi!", reply_markup=admin_menu())
-        else:
-            bot.reply_to(message, "❌ Bekor qilindi!", reply_markup=types.ReplyKeyboardRemove())
-
-# State: Kanal ID kiritish
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_channel_id" and is_admin(m.from_user.id))
 def process_channel_id(message):
     channel_id = message.text.strip()
@@ -254,101 +219,375 @@ def process_channel_id(message):
         bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
         
         if bot_member.status != 'administrator':
-            bot.reply_to(message, "❌ Bot admin emas!", reply_markup=admin_menu())
+            bot.reply_to(message, "❌ Bot bu kanalda admin emas!\n\nBotni kanalga admin qiling va 'Add members' huquqini bering.", reply_markup=admin_menu())
             del user_states[message.from_user.id]
             return
         
         if not bot_member.can_invite_users:
-            bot.reply_to(message, "❌ 'Add members' huquqi yo'q!", reply_markup=admin_menu())
+            bot.reply_to(message, "❌ Botda 'Add members' huquqi yo'q!", reply_markup=admin_menu())
             del user_states[message.from_user.id]
             return
         
-        channel_name = chat.title or f"Kanal"
+        channel_name = chat.title or "Noma'lum kanal"
+        channel_username = getattr(chat, 'username', None)
         
         channels_collection.update_one(
             {"channel_id": channel_id},
             {"$set": {
                 "channel_id": channel_id,
                 "channel_name": channel_name,
-                "channel_username": getattr(chat, 'username', None),
+                "channel_username": channel_username,
                 "added_by": str(message.from_user.id),
+                "added_by_name": message.from_user.first_name,
                 "created_at": datetime.now(),
                 "is_active": True
             }},
             upsert=True
         )
         
+        code = create_code_for_channel(channel_id, channel_name)
         del user_states[message.from_user.id]
-        bot.reply_to(message, f"✅ Kanal qo'shildi: {channel_name}\n\nEndi 🔑 Kod yaratish tugmasini bosing!", reply_markup=admin_menu())
+        
+        if code:
+            success_text = f"""
+✅ <b>Kanal qo'shildi!</b>
+
+📱 <b>Kanal:</b> {channel_name}
+🆔 <b>ID:</b> <code>{channel_id}</code>
+{"🔗 @" + channel_username if channel_username else ""}
+
+🔑 <b>Avtomatik kod:</b> <code>{code}</code>
+
+📝 Bu kodni foydalanuvchiga bering.
+"""
+            bot.reply_to(message, success_text, reply_markup=admin_menu())
+        else:
+            bot.reply_to(message, "✅ Kanal qo'shildi, lekin kod yaratishda xatolik!", reply_markup=admin_menu())
         
     except Exception as e:
         bot.reply_to(message, f"❌ Xatolik: {e}\n\nKanal ID sini tekshiring!", reply_markup=admin_menu())
         del user_states[message.from_user.id]
 
-# State: Broadcast
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_broadcast" and is_admin(m.from_user.id))
-def process_broadcast(message):
-    broadcast_text = message.text.strip()
-    del user_states[message.from_user.id]
-    
-    users = users_collection.find({})
-    sent = 0
-    err = 0
-    
-    msg = bot.reply_to(message, "📤 Yuborilmoqda...", reply_markup=admin_menu())
-    
-    for user in users:
-        try:
-            bot.send_message(user['user_id'], f"📢 {broadcast_text}")
-            sent += 1
-        except:
-            err += 1
-    
-    bot.edit_message_text(f"✅ Yuborildi: {sent}\n❌ Xatolik: {err}", chat_id=msg.chat.id, message_id=msg.message_id)
+# ============ 2. KANALLAR RO'YXATI VA O'CHIRISH ============
 
-# Kod yaratish callback
-@bot.callback_query_handler(func=lambda call: call.data.startswith('gen_'))
-def generate_code_callback(call):
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📋 Kanallar')
+def list_channels_btn(message):
+    channels = list(channels_collection.find({"is_active": True}))
+    
+    if not channels:
+        bot.reply_to(message, "📋 Kanallar yo'q!")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for ch in channels:
+        channel_name = ch.get('channel_name', 'Nomsiz')
+        # Kodlar soni
+        code_count = codes_collection.count_documents({"channel_id": ch['channel_id'], "is_active": True})
+        btn_text = f"📱 {channel_name} | 🔑 {code_count} kod"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"channel_{ch['channel_id']}"))
+    
+    bot.reply_to(message, "<b>📋 Kanallar ro'yxati:</b>\n\nKanalni tanlang:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('channel_'))
+def channel_detail(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "❌ Ruxsat yo'q!")
         return
     
-    channel_id = call.data.replace('gen_', '')
+    channel_id = call.data.replace('channel_', '')
     channel = channels_collection.find_one({"channel_id": channel_id})
     
     if not channel:
         bot.answer_callback_query(call.id, "❌ Kanal topilmadi!")
         return
     
-    try:
-        code = get_next_code_number()
-        codes_collection.insert_one({
-            "code": code,
-            "channel_id": channel_id,
-            "channel_name": channel.get("channel_name"),
-            "is_active": True,
-            "used_by": [],
-            "used_count": 0,
-            "created_by": str(call.from_user.id),
-            "created_at": datetime.now()
-        })
-        
-        bot.answer_callback_query(call.id, "✅ Kod yaratildi!")
-        bot.edit_message_text(
-            f"✅ <b>Kod yaratildi!</b>\n\n🔑 Kod: <code>{code}</code>\n📱 Kanal: {channel.get('channel_name')}\n\n📝 Bu kodni foydalanuvchiga bering.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ Xatolik: {e}")
+    # Kodlar soni
+    code_count = codes_collection.count_documents({"channel_id": channel_id, "is_active": True})
+    used_count = codes_collection.count_documents({"channel_id": channel_id, "used_count": {"$gt": 0}})
+    
+    text = f"""
+📱 <b>{channel.get('channel_name', 'Nomsiz')}</b>
 
-# Asosiy xabar handler (kodlarni tekshirish)
+🆔 <b>ID:</b> <code>{channel_id}</code>
+{"🔗 <b>Username:</b> @" + channel.get('channel_username') if channel.get('channel_username') else ""}
+🔑 <b>Kodlar:</b> {code_count} ta
+👥 <b>Ishlatilgan:</b> {used_count} ta
+📅 <b>Qo'shilgan:</b> {channel.get('created_at').strftime('%Y-%m-%d %H:%M') if channel.get('created_at') else 'Noma\'lum'}
+"""
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🗑 O'chirish", callback_data=f"delete_ch_{channel_id}"))
+    markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back_to_channels"))
+    
+    bot.edit_message_text(
+        text,
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        parse_mode='HTML',
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_channels")
+def back_to_channels(call):
+    if not is_admin(call.from_user.id):
+        return
+    
+    channels = list(channels_collection.find({"is_active": True}))
+    
+    if not channels:
+        bot.edit_message_text("📋 Kanallar yo'q!", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for ch in channels:
+        code_count = codes_collection.count_documents({"channel_id": ch['channel_id'], "is_active": True})
+        btn_text = f"📱 {ch.get('channel_name', 'Nomsiz')} | 🔑 {code_count} kod"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"channel_{ch['channel_id']}"))
+    
+    bot.edit_message_text(
+        "<b>📋 Kanallar ro'yxati:</b>\n\nKanalni tanlang:",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        parse_mode='HTML',
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_ch_'))
+def delete_channel(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Ruxsat yo'q!")
+        return
+    
+    channel_id = call.data.replace('delete_ch_', '')
+    channel = channels_collection.find_one({"channel_id": channel_id})
+    
+    if not channel:
+        bot.answer_callback_query(call.id, "❌ Kanal topilmadi!")
+        return
+    
+    # Tasdiqlash
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("✅ Ha, o'chirish", callback_data=f"confirm_delete_{channel_id}"),
+        types.InlineKeyboardButton("❌ Yo'q", callback_data=f"channel_{channel_id}")
+    )
+    
+    bot.edit_message_text(
+        f"⚠️ <b>{channel.get('channel_name')}</b> kanalini o'chirmoqchimisiz?\n\nBarcha kodlar ham o'chiriladi!",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        parse_mode='HTML',
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_delete_'))
+def confirm_delete_channel(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Ruxsat yo'q!")
+        return
+    
+    channel_id = call.data.replace('confirm_delete_', '')
+    
+    # Kanalni o'chirish
+    channels_collection.update_one(
+        {"channel_id": channel_id},
+        {"$set": {"is_active": False, "deleted_at": datetime.now()}}
+    )
+    
+    # Kodlarni o'chirish
+    codes_collection.update_many(
+        {"channel_id": channel_id},
+        {"$set": {"is_active": False, "deleted_at": datetime.now()}}
+    )
+    
+    bot.answer_callback_query(call.id, "✅ Kanal o'chirildi!")
+    
+    # Yangilangan ro'yxat
+    channels = list(channels_collection.find({"is_active": True}))
+    
+    if not channels:
+        bot.edit_message_text("📋 Kanallar yo'q!", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for ch in channels:
+        code_count = codes_collection.count_documents({"channel_id": ch['channel_id'], "is_active": True})
+        btn_text = f"📱 {ch.get('channel_name', 'Nomsiz')} | 🔑 {code_count} kod"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"channel_{ch['channel_id']}"))
+    
+    bot.edit_message_text(
+        "<b>📋 Kanallar ro'yxati:</b>\n\nKanalni tanlang:",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        parse_mode='HTML',
+        reply_markup=markup
+    )
+
+# ============ 3. STATISTIKA ============
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📊 Statistika')
+def stats_btn(message):
+    total_channels = channels_collection.count_documents({"is_active": True})
+    total_codes = codes_collection.count_documents({})
+    active_codes = codes_collection.count_documents({"is_active": True})
+    used_codes = codes_collection.count_documents({"used_count": {"$gt": 0}})
+    
+    # Barcha foydalanuvchilar (unique)
+    all_users = users_collection.distinct("user_id")
+    total_users = len(all_users)
+    
+    # Bugun qo'shilgan
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_users = users_collection.count_documents({"last_used_at": {"$gte": today}})
+    
+    setting = settings_collection.find_one({"_id": "code_counter"})
+    last_code = setting.get('last_code_number', 0) if setting else 0
+    
+    text = f"""
+📊 <b>Bot Statistikasi</b>
+
+📱 <b>Kanallar:</b> {total_channels} ta
+🔑 <b>Jami kodlar:</b> {total_codes} ta
+✅ <b>Aktiv kodlar:</b> {active_codes} ta
+👥 <b>Ishlatilgan:</b> {used_codes} ta
+
+👤 <b>Jami foydalanuvchilar:</b> {total_users} ta
+🆕 <b>Bugun:</b> {today_users} ta
+
+🔢 <b>Oxirgi kod:</b> {last_code}
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
+"""
+    bot.reply_to(message, text)
+
+# ============ 4. XABAR YUBORISH (TUGMA BILAN) ============
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and m.text == '📢 Xabar yuborish')
+def broadcast_btn(message):
+    user_states[message.from_user.id] = {"state": "waiting_broadcast_text"}
+    bot.reply_to(
+        message,
+        """📢 <b>Xabar yuborish</b>
+
+1️⃣ Avval xabar matnini yuboring
+2️⃣ Keyin tugma qo'shish uchun:
+<code>Tugma matni - havola</code>
+
+Misol:
+<code>Kanalga o'tish - https://t.me/kanal</code>
+
+Bir nechta tugma uchun har birini yangi qatordan yozing.
+
+❌ Bekor qilish: /cancel""",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and isinstance(user_states.get(m.from_user.id), dict) and user_states[m.from_user.id].get("state") == "waiting_broadcast_text")
+def process_broadcast_text(message):
+    user_states[message.from_user.id] = {
+        "state": "waiting_broadcast_buttons",
+        "text": message.text.strip()
+    }
+    bot.reply_to(
+        message,
+        f"""📝 <b>Xabar matni saqlandi!</b>
+
+Endi tugmalarni qo'shing:
+<code>Tugma matni - havola</code>
+
+Misol:
+<code>Kanalga o'tish - https://t.me/kanal</code>
+<code>Bot - https://t.me/bot</code>
+
+Yoki tugmasiz yuborish uchun <b>/send</b> deb yozing.
+
+❌ Bekor qilish: /cancel"""
+    )
+
+@bot.message_handler(commands=['send'])
+def send_broadcast_no_buttons(message):
+    if not is_admin(message.from_user.id) or message.from_user.id not in user_states:
+        return
+    
+    state_data = user_states[message.from_user.id]
+    if not isinstance(state_data, dict) or state_data.get("state") != "waiting_broadcast_buttons":
+        return
+    
+    text = state_data.get("text", "")
+    del user_states[message.from_user.id]
+    
+    # Tugmasiz yuborish
+    send_broadcast_to_users(message, text, None)
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and isinstance(user_states.get(m.from_user.id), dict) and user_states[m.from_user.id].get("state") == "waiting_broadcast_buttons")
+def process_broadcast_buttons(message):
+    text = message.text.strip()
+    
+    # Tugmalarni ajratish
+    buttons = []
+    lines = text.split('\n')
+    
+    for line in lines:
+        if ' - ' in line:
+            parts = line.split(' - ', 1)
+            if len(parts) == 2:
+                btn_text = parts[0].strip()
+                btn_url = parts[1].strip()
+                if btn_text and btn_url:
+                    buttons.append({"text": btn_text, "url": btn_url})
+    
+    state_data = user_states[message.from_user.id]
+    broadcast_text = state_data.get("text", "")
+    del user_states[message.from_user.id]
+    
+    # Tugma bilan yuborish
+    send_broadcast_to_users(message, broadcast_text, buttons)
+
+def send_broadcast_to_users(message, text, buttons):
+    """Xabarni barcha foydalanuvchilarga yuborish"""
+    users = users_collection.find({})
+    sent = 0
+    err = 0
+    
+    status_msg = bot.reply_to(message, "📤 Xabar yuborilmoqda...", reply_markup=admin_menu())
+    
+    for user in users:
+        try:
+            if buttons:
+                markup = types.InlineKeyboardMarkup()
+                for btn in buttons:
+                    markup.add(types.InlineKeyboardButton(btn['text'], url=btn['url']))
+                bot.send_message(user['user_id'], text, reply_markup=markup)
+            else:
+                bot.send_message(user['user_id'], text)
+            sent += 1
+        except:
+            err += 1
+    
+    bot.edit_message_text(
+        f"✅ <b>Xabar yuborildi!</b>\n\n📤 Yuborildi: {sent}\n❌ Xatolik: {err}",
+        chat_id=status_msg.chat.id,
+        message_id=status_msg.message_id,
+        parse_mode='HTML'
+    )
+
+# ============ CANCEL ============
+
+@bot.message_handler(commands=['cancel'])
+def cancel(message):
+    if message.from_user.id in user_states:
+        del user_states[message.from_user.id]
+        if is_admin(message.from_user.id):
+            bot.reply_to(message, "❌ Bekor qilindi!", reply_markup=admin_menu())
+        else:
+            bot.reply_to(message, "❌ Bekor qilindi!", reply_markup=types.ReplyKeyboardRemove())
+
+# ============ ASOSIY XABAR HANDLER ============
+
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
     user_id = message.from_user.id
     
-    # State ichida bo'lsa qaytish
     if user_id in user_states:
         return
     
@@ -362,7 +601,8 @@ def handle_message(message):
     else:
         bot.reply_to(message, result["message"])
 
-# Flask routes
+# ============ FLASK ============
+
 @app.route('/')
 def index():
     return f"<h1>🤖 Bot ishlamoqda!</h1><p>Status: {'✅ Active' if bot_started else '⏳ Starting...'}</p>"
@@ -371,7 +611,8 @@ def index():
 def health():
     return {"status": "healthy" if bot_started else "starting"}
 
-# Botni ishga tushirish
+# ============ BOTNI ISHGA TUSHIRISH ============
+
 def init_bot():
     global bot_started
     try:
