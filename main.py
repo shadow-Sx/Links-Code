@@ -1,6 +1,5 @@
 import os
 import sys
-import certifi
 import telebot
 from telebot import types
 from pymongo import MongoClient
@@ -8,6 +7,7 @@ from datetime import datetime
 import logging
 from flask import Flask, request
 import threading
+import traceback
 
 # Logging sozlamalari
 logging.basicConfig(
@@ -23,7 +23,7 @@ app = Flask(__name__)
 # Environment variables (Render'dan oladi)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
-DB_NAME = os.getenv('DB_NAME', 'invite_bot_db')
+DB_NAME = os.getenv('DB_NAME', 'UzbLinks')
 
 # Admin ID larini olish va tozalash
 admin_ids_str = os.getenv('ADMIN_IDS', '')
@@ -34,21 +34,21 @@ if admin_ids_str:
     except ValueError:
         logger.error("ADMIN_IDS noto'g'ri formatda! Misol: ADMIN_IDS=123456789,987654321")
 
-# MongoDB ulanish (SSL muammosini hal qilish)
+logger.info(f"🔧 Konfiguratsiya yuklandi: DB={DB_NAME}, Adminlar={len(ADMIN_IDS)} ta")
+
+# MongoDB ulanish
 try:
     if not MONGODB_URI:
         raise ValueError("MONGODB_URI environment variable topilmadi!")
     
-    # MongoDB ulanish sozlamalari - SSL xatosini tuzatish
+    logger.info("🍃 MongoDB ga ulanishga harakat qilinmoqda...")
+    
+    # Oddiy va ishonchli ulanish
     client = MongoClient(
         MONGODB_URI,
-        tls=True,
-        tlsCAFile=certifi.where(),
-        serverSelectionTimeoutMS=30000,
-        connectTimeoutMS=30000,
-        socketTimeoutMS=30000,
-        retryWrites=True,
-        w='majority'
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=10000
     )
     
     # Ulanishni tekshirish
@@ -66,6 +66,7 @@ try:
     
 except Exception as e:
     logger.error(f"❌ MongoDB ulanishda xatolik: {e}")
+    logger.error(traceback.format_exc())
     sys.exit(1)
 
 # MongoDB indekslar yaratish
@@ -76,10 +77,11 @@ try:
     users_collection.create_index("user_id", unique=True)
     logger.info("✅ MongoDB indekslar yaratildi!")
 except Exception as e:
-    logger.warning(f"Indeks yaratishda ogohlantirish: {e}")
+    logger.warning(f"⚠️ Indeks yaratishda ogohlantirish: {e}")
 
 # Bot yaratish
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
+logger.info("🤖 Bot obyekti yaratildi")
 
 # Oxirgi kod raqamini olish
 def get_next_code_number():
@@ -98,6 +100,7 @@ def get_next_code_number():
             settings_collection.insert_one({"_id": "code_counter", "last_code_number": 1})
             code_number = 1
         
+        logger.info(f"🔢 Yangi kod raqami: {code_number}")
         return str(code_number)
     except Exception as e:
         logger.error(f"Kod raqami olishda xatolik: {e}")
@@ -111,10 +114,13 @@ def is_admin(user_id):
 def get_channel_invite_link(channel_id):
     """Kanal uchun bir martalik havola yaratadi"""
     try:
-        chat = bot.get_chat(channel_id)
-        
         # Bot kanalda admin ekanligini tekshirish
         bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
+        
+        if bot_member.status != 'administrator':
+            logger.error(f"Bot {channel_id} kanalda admin emas!")
+            return None
+        
         if not bot_member.can_invite_users:
             logger.error(f"Bot {channel_id} kanalda taklif qilish huquqiga ega emas!")
             return None
@@ -123,10 +129,10 @@ def get_channel_invite_link(channel_id):
         invite_link = bot.create_chat_invite_link(
             chat_id=channel_id,
             member_limit=1,
-            name=f"One-time invite {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            name=f"One-time invite"
         )
         
-        logger.info(f"Havola yaratildi: {invite_link.invite_link}")
+        logger.info(f"✅ Havola yaratildi: {invite_link.invite_link[:30]}...")
         return invite_link.invite_link
         
     except Exception as e:
@@ -221,9 +227,13 @@ def verify_and_use_code(code, user_id, username, first_name):
         
         # Muvaffaqiyatli xabar
         success_message = f"""
-<b>Topildi 🎉</b>
-<blockquote><b>Kanalga qoshilish uchun pastdagi tugmani bosing va kanalga qoshiling</b></blockquote>
+✅ <b>Kod muvaffaqiyatli qabul qilindi!</b>
+
+📱 <b>Kanal:</b> {channel_data.get('channel_name', 'Noma\'lum kanal')}
+
+🔽 Kanalga qo'shilish uchun pastdagi tugmani bosing:
 """
+        logger.info(f"✅ Kod {code} ishlatildi - Foydalanuvchi: {user_id}")
         return {
             "success": True, 
             "message": success_message,
@@ -232,6 +242,7 @@ def verify_and_use_code(code, user_id, username, first_name):
         
     except Exception as e:
         logger.error(f"Kod tekshirishda xatolik: {e}")
+        logger.error(traceback.format_exc())
         return {
             "success": False, 
             "message": "❌ <b>Xatolik yuz berdi!</b>\n\nIltimos, qaytadan urinib ko'ring.",
@@ -242,8 +253,9 @@ def verify_and_use_code(code, user_id, username, first_name):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     """Start komandasi"""
+    logger.info(f"👤 Yangi foydalanuvchi: {message.from_user.id} - {message.from_user.first_name}")
     welcome_text = """
-🤖 <b>One-Time Invite Bot</b>
+🤖 <b>UzbLinks - One-Time Invite Bot</b>
 
 Assalomu alaykum, <b>{}</b>!
 
@@ -295,9 +307,8 @@ def about_bot(message):
     about_text = """
 ℹ️ <b>Bot haqida</b>
 
-<b>Nomi:</b> One-Time Invite Bot
+<b>Nomi:</b> UzbLinks Invite Bot
 <b>Versiya:</b> 1.0
-<b>Yaratilgan:</b> 2024
 
 <b>Xususiyatlari:</b>
 ✅ Avtomatik kod generatsiyasi
@@ -307,7 +318,7 @@ def about_bot(message):
 
 <b>Texnologiyalar:</b>
 🐍 Python + pyTelegramBotAPI
-🍃 MongoDB
+🍃 MongoDB Atlas
 ☁️ Render Cloud
 """
     bot.reply_to(message, about_text)
@@ -379,6 +390,8 @@ def add_channel_id(message):
         channel_id = parts[0].strip()
         channel_name = parts[1].strip()
         
+        logger.info(f"📺 Kanal qo'shish: {channel_id} - {channel_name}")
+        
         try:
             chat = bot.get_chat(channel_id)
             
@@ -410,6 +423,8 @@ def add_channel_id(message):
             },
             upsert=True
         )
+        
+        logger.info(f"✅ Kanal qo'shildi: {channel_name}")
         
         bot.reply_to(
             message,
@@ -485,6 +500,8 @@ def generate_code_for_channel(call):
             "last_used_at": None,
             "last_invite_link": None
         })
+        
+        logger.info(f"✅ Yangi kod yaratildi: {code} -> {channel.get('channel_name')}")
         
         bot.answer_callback_query(call.id, "✅ Kod yaratildi!")
         
@@ -577,6 +594,7 @@ def deactivate_specific_code(message):
         )
         
         if result.modified_count > 0:
+            logger.info(f"🚫 Kod o'chirildi: {code}")
             bot.reply_to(message, f"✅ Kod <code>{code}</code> muvaffaqiyatli o'chirildi!", parse_mode='HTML')
         else:
             bot.reply_to(message, f"❌ <code>{code}</code> kodi topilmadi!", parse_mode='HTML')
@@ -673,13 +691,14 @@ def handle_all_messages(message):
     first_name = message.from_user.first_name
     text = message.text.strip()
     
+    logger.info(f"📨 Xabar: [{user_id}] {first_name}: {text}")
+    
     # Admin komandalarni tekshirish
     if text.startswith('/'):
         bot.reply_to(message, "❌ Noma'lum komanda! /help orqali yordam oling.")
         return
     
     # Kodni tekshirish
-    logger.info(f"Foydalanuvchi {user_id} ({first_name}) kod yubordi: {text}")
     result = verify_and_use_code(text, user_id, username, first_name)
     
     if result["success"] and result["invite_link"]:
@@ -709,7 +728,8 @@ def index():
     return """
     <html>
         <head>
-            <title>One-Time Invite Bot</title>
+            <title>UzbLinks - Invite Bot</title>
+            <meta charset="UTF-8">
             <style>
                 body {
                     font-family: Arial, sans-serif;
@@ -724,13 +744,19 @@ def index():
                     border-radius: 10px;
                     display: inline-block;
                 }
+                .status {
+                    font-size: 18px;
+                    margin: 20px 0;
+                }
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>🤖 One-Time Invite Bot</h1>
-                <p>Bot ishlamoqda!</p>
-                <p>Status: ✅ Active</p>
+                <h1>🤖 UzbLinks - Invite Bot</h1>
+                <div class="status">
+                    <p>Bot ishlamoqda!</p>
+                    <p>Status: ✅ Active</p>
+                </div>
             </div>
         </body>
     </html>
@@ -739,24 +765,74 @@ def index():
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}, 200
+    return {
+        "status": "healthy",
+        "service": "UzbLinks Bot",
+        "timestamp": datetime.now().isoformat()
+    }, 200
 
-# Botni alohida thread'da ishga tushirish
-def run_bot():
-    """Botni ishga tushirish"""
-    logger.info("🤖 Bot ishga tushmoqda...")
+@app.route('/bot_info')
+def bot_info():
+    """Bot ma'lumotlarini olish"""
     try:
-        bot.remove_webhook()
-        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        bot_info = bot.get_me()
+        return {
+            "status": "ok",
+            "bot": {
+                "id": bot_info.id,
+                "username": bot_info.username,
+                "name": bot_info.first_name,
+                "is_bot": bot_info.is_bot
+            },
+            "timestamp": datetime.now().isoformat()
+        }, 200
     except Exception as e:
-        logger.error(f"Bot polling xatolik: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }, 500
 
 # Asosiy ishga tushirish
 if __name__ == '__main__':
-    # Botni alohida thread'da ishga tushirish
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    logger.info("=" * 50)
+    logger.info("🚀 UzbLinks Bot ishga tushirilmoqda...")
+    logger.info("=" * 50)
     
-    # Flask app'ni ishga tushirish
+    # Bot thread'ini yaratish
+    def start_bot():
+        """Botni ishga tushirish"""
+        try:
+            logger.info("🤖 Bot thread boshlandi")
+            logger.info(f"🔑 Token: {BOT_TOKEN[:15]}...")
+            
+            # Webhook ni o'chirish
+            logger.info("🔄 Webhook o'chirilmoqda...")
+            bot.remove_webhook()
+            logger.info("✅ Webhook o'chirildi!")
+            
+            # Bot ma'lumotlarini olish
+            logger.info("📡 Bot ma'lumotlari olinmoqda...")
+            bot_info = bot.get_me()
+            logger.info(f"✅ Bot: @{bot_info.username} - {bot_info.first_name}")
+            
+            # Polling boshlash
+            logger.info("🔄 Polling boshlanmoqda...")
+            bot.infinity_polling(
+                timeout=10, 
+                long_polling_timeout=5,
+                logger_level=logging.INFO
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Bot ishga tushishda xatolik: {e}")
+            logger.error(traceback.format_exc())
+    
+    # Thread yaratish va ishga tushirish
+    bot_thread = threading.Thread(target=start_bot, name="TelegramBot", daemon=True)
+    bot_thread.start()
+    logger.info(f"✅ Bot thread yaratildi: {bot_thread.name}")
+    
+    # Flask serverni ishga tushirish
     port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    logger.info(f"🌐 Web server {port} portda ishga tushmoqda...")
+    app.run(host='0.0.0.0', port=port, debug=False)
