@@ -9,6 +9,8 @@ from flask import Flask
 import threading
 import traceback
 import time
+import random
+import string
 
 # Logging
 logging.basicConfig(
@@ -70,7 +72,13 @@ LINK_EXPIRE_MINUTES = 10
 
 # ============ FUNKSIYALAR ============
 
+def generate_random_code(length=8):
+    """Random kod yaratish - raqam va harflar"""
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
+
 def get_next_code_number():
+    """Ketma-ket raqamli kod"""
     try:
         setting = settings_collection.find_one_and_update(
             {"_id": "code_counter"},
@@ -85,13 +93,23 @@ def get_next_code_number():
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-def create_code_for_channel(channel_id, channel_name):
+def create_code_for_channel(channel_id, channel_name, code_type="number"):
+    """Kanal uchun kod yaratish"""
     try:
-        code = get_next_code_number()
+        if code_type == "number":
+            code = get_next_code_number()
+        else:
+            # Random kod - unique bo'lishini tekshirish
+            while True:
+                code = generate_random_code()
+                if not codes_collection.find_one({"code": code}):
+                    break
+        
         codes_collection.insert_one({
             "code": code,
             "channel_id": channel_id,
             "channel_name": channel_name,
+            "code_type": code_type,
             "is_active": True,
             "used_by": [],
             "used_count": 0,
@@ -100,7 +118,7 @@ def create_code_for_channel(channel_id, channel_name):
             "last_used_at": None,
             "last_invite_link": None
         })
-        logger.info(f"✅ Kod yaratildi: {code} -> {channel_name}")
+        logger.info(f"✅ Kod yaratildi: {code} ({code_type}) -> {channel_name}")
         return code
     except Exception as e:
         logger.error(f"Kod yaratishda xatolik: {e}")
@@ -111,34 +129,29 @@ def get_channel_invite_link(channel_id):
     try:
         bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
         if bot_member.status != 'administrator' or not bot_member.can_invite_users:
-            return None
+            return None, None
         
-        # Vaqt chegarasi
         expire_time = datetime.now() + timedelta(minutes=LINK_EXPIRE_MINUTES)
         
         invite = bot.create_chat_invite_link(
             chat_id=channel_id,
-            member_limit=1,  # Faqat 1 kishi
-            expire_date=expire_time  # 10 daqiqa
+            member_limit=1,
+            expire_date=expire_time
         )
         
-        logger.info(f"✅ Havola yaratildi (1 kishilik, {LINK_EXPIRE_MINUTES} daqiqa): {invite.invite_link[:30]}...")
+        logger.info(f"✅ Havola yaratildi: {invite.invite_link[:30]}...")
         return invite.invite_link, expire_time
     except Exception as e:
         logger.error(f"Havola yaratishda xatolik: {e}")
         return None, None
 
 def verify_and_use_code(code, user_id, username, first_name):
+    """Kodni tekshirish va havola berish (qayta ishlatish mumkin)"""
     try:
-        code_data = codes_collection.find_one({"code": code, "is_active": True})
+        code_data = codes_collection.find_one({"code": code.upper(), "is_active": True})
         
         if not code_data:
             return {"success": False, "message": "❌ Noto'g'ri yoki aktiv bo'lmagan kod!", "invite_link": None}
-        
-        user_id_str = str(user_id)
-        if "used_by" in code_data:
-            if any(u["user_id"] == user_id_str for u in code_data["used_by"]):
-                return {"success": False, "message": "❌ Siz bu kodni oldin ishlatgansiz!", "invite_link": None}
         
         channel_data = channels_collection.find_one({"channel_id": code_data["channel_id"]})
         if not channel_data:
@@ -147,6 +160,9 @@ def verify_and_use_code(code, user_id, username, first_name):
         invite_link, expire_time = get_channel_invite_link(code_data["channel_id"])
         if not invite_link:
             return {"success": False, "message": "❌ Havola yaratishda xatolik!", "invite_link": None}
+        
+        # Kod statistikasini yangilash (qayta ishlatishga ruxsat)
+        user_id_str = str(user_id)
         
         codes_collection.update_one(
             {"_id": code_data["_id"]},
@@ -182,12 +198,17 @@ def verify_and_use_code(code, user_id, username, first_name):
             upsert=True
         )
         
-        # Vaqtni formatlash
         expire_str = expire_time.strftime('%H:%M') if expire_time else "10 daqiqa"
         
         success_message = f"""
-<b>Tupildi 🎉</b>
-<blockquote><b>Tezroq kanalga qo'shiling aks holda havola 10 daqiqadan so'ng havola eskiradi ⛓‍💥</b></blockquote>
+✅ <b>Kod qabul qilindi!</b>
+
+📱 <b>Kanal:</b> {channel_data.get('channel_name')}
+
+⏰ <b>Havola muddati:</b> {expire_str} gacha
+👤 <b>Foydalanish:</b> Faqat 1 kishi
+
+🔽 Pastdagi tugma orqali kanalga qo'shiling:
 """
         return {
             "success": True,
@@ -216,6 +237,23 @@ def admin_menu():
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    # Deep linking: /start KOD
+    args = message.text.split()
+    
+    if len(args) > 1:
+        # Agar kod bilan kelgan bo'lsa
+        code = args[1].upper()
+        result = verify_and_use_code(code, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
+        if result["success"] and result["invite_link"]:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("▷ 𝗞𝗮𝗻𝗮𝗹𝗴𝗮 𝗾𝗼'𝘀𝗵𝗶𝗹𝗶𝘀𝗵 ◁", url=result["invite_link"]))
+            bot.reply_to(message, result["message"], reply_markup=markup)
+        else:
+            bot.reply_to(message, result["message"])
+        return
+    
+    # Oddiy start
     if is_admin(message.from_user.id):
         bot.reply_to(message, "👑 <b>Admin panel</b>\n\nKerakli amalni tanlang:", reply_markup=admin_menu())
     else:
@@ -226,7 +264,11 @@ def help_cmd(message):
     if is_admin(message.from_user.id):
         bot.reply_to(message, "👑 Admin panel:\n\n➕ Kanal qo'shish\n📋 Kanallar - ro'yxat va o'chirish\n📊 Statistika\n📢 Xabar yuborish - tugma bilan")
     else:
-        bot.reply_to(message, "📝 Kodni oling va botga yuboring.\n\nHavola 1 kishilik va 10 daqiqa amal qiladi.")
+        bot_msg = f"🤖 <b>Bot haqida</b>\n\n"
+        bot_msg += f"📝 Kodni oling va botga yuboring\n"
+        bot_msg += f"🔗 Yoki havola orqali: https://t.me/{bot.get_me().username}?start=KOD\n\n"
+        bot_msg += f"⏰ Havola 1 kishilik va {LINK_EXPIRE_MINUTES} daqiqa amal qiladi"
+        bot.reply_to(message, bot_msg)
 
 # ============ 1. KANAL QO'SHISH ============
 
@@ -267,6 +309,7 @@ def process_channel_id(message):
         channel_name = chat.title or "Noma'lum kanal"
         channel_username = getattr(chat, 'username', None)
         
+        # Kanalni saqlash
         channels_collection.update_one(
             {"channel_id": channel_id},
             {"$set": {
@@ -281,30 +324,83 @@ def process_channel_id(message):
             upsert=True
         )
         
-        code = create_code_for_channel(channel_id, channel_name)
-        del user_states[message.from_user.id]
+        # Kod yaratish turini so'rash
+        user_states[message.from_user.id] = {
+            "state": "waiting_code_type",
+            "channel_id": channel_id,
+            "channel_name": channel_name
+        }
         
-        if code:
-            success_text = f"""
-✅ <b>Kanal qo'shildi!</b>
-
-📱 <b>Kanal:</b> {channel_name}
-🆔 <b>ID:</b> <code>{channel_id}</code>
-{"🔗 @" + channel_username if channel_username else ""}
-
-🔑 <b>Kod:</b> <code>{code}</code>
-
-📝 Bu kod orqali havola:
-• 1 kishilik
-• {LINK_EXPIRE_MINUTES} daqiqa muddatli
-"""
-            bot.reply_to(message, success_text, reply_markup=admin_menu())
-        else:
-            bot.reply_to(message, "✅ Kanal qo'shildi, lekin kod yaratishda xatolik!", reply_markup=admin_menu())
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("🔢 Raqam", callback_data=f"codetype_number_{channel_id}"),
+            types.InlineKeyboardButton("🎲 Random", callback_data=f"codetype_random_{channel_id}")
+        )
+        
+        bot.reply_to(
+            message,
+            f"✅ <b>Kanal topildi:</b> {channel_name}\n\n<b>Kod yaratish turini tanlang:</b>",
+            reply_markup=markup
+        )
         
     except Exception as e:
         bot.reply_to(message, f"❌ Xatolik: {e}\n\nKanal ID sini tekshiring!", reply_markup=admin_menu())
         del user_states[message.from_user.id]
+
+# Kod turini tanlash
+@bot.callback_query_handler(func=lambda call: call.data.startswith('codetype_'))
+def choose_code_type(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Ruxsat yo'q!")
+        return
+    
+    parts = call.data.split('_')
+    code_type = parts[1]  # number yoki random
+    channel_id = parts[2]
+    
+    channel_name = "Kanal"
+    if call.message.chat.id in user_states:
+        channel_name = user_states[call.message.chat.id].get("channel_name", "Kanal")
+        del user_states[call.message.chat.id]
+    
+    code = create_code_for_channel(channel_id, channel_name, code_type)
+    
+    if code:
+        type_name = "Raqam" if code_type == "number" else "Random"
+        bot_username = bot.get_me().username
+        deep_link = f"https://t.me/{bot_username}?start={code}"
+        
+        bot.answer_callback_query(call.id, "✅ Kod yaratildi!")
+        
+        success_text = f"""
+✅ <b>Kod yaratildi!</b>
+
+📱 <b>Kanal:</b> {channel_name}
+🔑 <b>Kod:</b> <code>{code}</code>
+📋 <b>Tur:</b> {type_name}
+
+🔗 <b>Havola:</b> {deep_link}
+
+📝 <b>Foydalanish:</b>
+• Kodni botga yuboring
+• Yoki havola orqali: {deep_link}
+
+⏰ Havola: 1 kishilik, {LINK_EXPIRE_MINUTES} daqiqa
+"""
+        bot.edit_message_text(
+            success_text,
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Kod yaratishda xatolik!")
+        bot.edit_message_text(
+            "❌ Kod yaratishda xatolik!",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
 
 # ============ 2. KANALLAR RO'YXATI VA O'CHIRISH ============
 
@@ -352,6 +448,7 @@ def channel_detail(call):
 """
     
     markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔑 Kod yaratish", callback_data=f"codetype_number_{channel_id}"))
     markup.add(types.InlineKeyboardButton("🗑 O'chirish", callback_data=f"delete_ch_{channel_id}"))
     markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back_to_channels"))
     
@@ -484,7 +581,7 @@ def stats_btn(message):
 👤 <b>Jami foydalanuvchilar:</b> {total_users} ta
 🆕 <b>Bugun:</b> {today_users} ta
 
-🔢 <b>Oxirgi kod:</b> {last_code}
+🔢 <b>Oxirgi raqam:</b> {last_code}
 ⏰ <b>Havola muddati:</b> {LINK_EXPIRE_MINUTES} daqiqa
 
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -612,7 +709,7 @@ def handle_message(message):
     if user_id in user_states:
         return
     
-    text = message.text.strip()
+    text = message.text.strip().upper()
     result = verify_and_use_code(text, user_id, message.from_user.username, message.from_user.first_name)
     
     if result["success"] and result["invite_link"]:
