@@ -201,14 +201,8 @@ def verify_and_use_code(code, user_id, username, first_name):
         expire_str = expire_time.strftime('%H:%M') if expire_time else "10 daqiqa"
         
         success_message = f"""
-✅ <b>Kod qabul qilindi!</b>
-
-📱 <b>Kanal:</b> {channel_data.get('channel_name')}
-
-⏰ <b>Havola muddati:</b> {expire_str} gacha
-👤 <b>Foydalanish:</b> Faqat 1 kishi
-
-🔽 Pastdagi tugma orqali kanalga qo'shiling:
+<b>Topildi 🎉</b>
+<blockquote><b>Kanalga qo'shiling aksholda 10-daqiqadan so'ng havola mudati tugaydi⛓‍💥</b></blockquote>
 """
         return {
             "success": True,
